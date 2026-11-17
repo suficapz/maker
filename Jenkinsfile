@@ -2,54 +2,115 @@ pipeline {
     agent any
 
     environment {
-        IMAGE_NAME   = 'maker-website'
-        REGISTRY     = 'your-dockerhub-username'          // ← change me
-        IMAGE_TAG    = "${env.BUILD_NUMBER}"
-        DOCKER_CREDS = 'docker-credentials-id'            // ← Jenkins credential ID
+        DOCKER_CREDENTIALS_ID = 'docker-cred'
+        DOCKER_IMAGE          = 'muhammedsufiyan/maker'
+        SONAR_SERVER_NAME     = 'sonarqube-env'
+        SONAR_SCANNER_TOOL    = 'sonar-scanner'
+        GIT_CREDENTIALS_ID    = 'github-cred'
+        MANIFEST_REPO         = 'https://github.com/suficapz/maker.git'
+        MANIFEST_BRANCH       = 'main'
     }
 
     stages {
 
-        stage('Checkout') {
+        stage('Checkout Source Code') {
             steps {
-                echo 'Passed...'
+                echo "Source code checked out successfully"
             }
         }
 
-        stage('Build and Test') {
-            steps {
-                echo 'Building project...'
-                // Add your build command here, e.g: sh 'npm install'
-                echo 'Running tests...'
-                // Add your test command here, e.g: sh 'npm test'
-            }
-        }
-
-        stage('Docker Build and Push') {
+        stage('SonarQube Analysis') {
             steps {
                 script {
-                    docker.withRegistry('', "${DOCKER_CREDS}") {
-                        def img = docker.build("${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}")
-                        img.push()
-                        img.push('latest')
+                    def scannerHome = tool "${SONAR_SCANNER_TOOL}"
+
+                    withSonarQubeEnv("${SONAR_SERVER_NAME}") {
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner \
+                            -Dsonar.projectKey=maker-key \
+                            -Dsonar.projectName=maker-project \
+                            -Dsonar.sources=.
+                        """
                     }
                 }
             }
         }
 
-        stage('Update Deployment File') {
+        stage('Build & Push Docker Image') {
             steps {
-                sh """
-                    sed -i 's|IMAGE_PLACEHOLDER|${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}|g' manifests/deployment.yaml
-                    cat manifests/deployment.yaml
-                """
+                script {
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: "${DOCKER_CREDENTIALS_ID}",
+                            usernameVariable: 'DOCKER_USER',
+                            passwordVariable: 'DOCKER_PASS'
+                        )
+                    ]) {
+                        sh """
+                            echo "\$DOCKER_PASS" | docker login -u "\$DOCKER_USER" --password-stdin
+
+                            docker build \
+                            -t ${DOCKER_IMAGE}:${env.BUILD_NUMBER} \
+                            -t ${DOCKER_IMAGE}:latest \
+                            -f Dockerfile .
+
+                            docker push ${DOCKER_IMAGE}:${env.BUILD_NUMBER}
+                            docker push ${DOCKER_IMAGE}:latest
+                        """
+                    }
+                }
             }
         }
 
+        stage('Update Manifest Repo') {
+            steps {
+                dir('manifest-workspace') {
+
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${MANIFEST_BRANCH}"]],
+                        userRemoteConfigs: [[
+                            credentialsId: "${GIT_CREDENTIALS_ID}",
+                            url: "${MANIFEST_REPO}"
+                        ]]
+                    ])
+
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: "${GIT_CREDENTIALS_ID}",
+                            usernameVariable: 'GIT_USERNAME',
+                            passwordVariable: 'GIT_TOKEN'
+                        )
+                    ]) {
+                        sh """
+                            sed -i 's|image: IMAGE_PLACEHOLDER|image: ${DOCKER_IMAGE}:${env.BUILD_NUMBER}|' manifests/deployment.yaml
+
+                            git config user.name "suficapz"
+                            git config user.email "sufiyanathikal@gamil.com"
+
+                            git add manifests/deployment.yaml
+
+                            if ! git diff --cached --quiet; then
+                                git commit -m "Update maker image to ${env.BUILD_NUMBER}"
+
+                                git push https://\${GIT_USERNAME}:\${GIT_TOKEN}@github.com/suficapz/maker.git HEAD:${MANIFEST_BRANCH}
+                            else
+                                echo "No manifest changes to commit"
+                            fi
+                        """
+                    }
+                }
+            }
+        }
     }
 
     post {
-        success { echo "✅ Pipeline succeeded — image: ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}" }
-        failure { echo "❌ Pipeline failed." }
+        success {
+            echo 'Pipeline executed successfully! Manifest repo updated with new image tag.'
+        }
+
+        failure {
+            echo 'Pipeline failed. Please review the stage logs above.'
+        }
     }
 }
