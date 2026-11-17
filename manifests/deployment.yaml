@@ -24,7 +24,7 @@ spec:
     spec:
       containers:
         - name: maker
-          image: IMAGE_PLACEHOLDER          # replaced by Jenkinsfile at deploy time
+          image: muhammedsufiyan/maker:8          # replaced by Jenkinsfile at deploy time
           imagePullPolicy: Always
           ports:
             - containerPort: 80
